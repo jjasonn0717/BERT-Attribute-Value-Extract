@@ -13,7 +13,7 @@ from callback.progressbar import ProgressBar
 from tools.common import seed_everything,json_to_text
 from tools.common import init_logger, logger
 
-from models.transformers import WEIGHTS_NAME,BertConfig
+from models.transformers import WEIGHTS_NAME,BertConfig,BertTokenizer
 from models.bert_for_attr import BertCrfForAttr
 from processors.utils_attr import CNerTokenizer,get_entities
 from processors.attr_seq import convert_examples_to_features
@@ -25,7 +25,7 @@ ALL_MODELS = sum((tuple(conf.pretrained_config_archive_map.keys()) for conf in (
 
 MODEL_CLASSES = {
     ## bert ernie bert_wwm bert_wwwm_ext,roberta
-    'bert': (BertConfig, BertCrfForAttr, CNerTokenizer),
+    'bert': (BertConfig, BertCrfForAttr, BertTokenizer),
 }
 
 def train(args, train_dataset, model, tokenizer):
@@ -130,17 +130,36 @@ def train(args, train_dataset, model, tokenizer):
                 continue
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
-            inputs = {"t_input_ids": batch[0],
-                      'a_input_ids': batch[4],
-                      "t_attention_mask": batch[1],
-                      'a_attention_mask': batch[5],
-                      "labels": batch[8],
-                      'input_lens':batch[3]}
+            # t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens, t_all_orig_to_tok_index, t_all_word_lens a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens, a_all_orig_to_tok_index, a_all_word_lens, all_label_ids
+            inputs = {'t_input_ids': batch[0],
+                      'a_input_ids': batch[6],
+                      't_orig_to_tok_index': batch[4],
+                      'a_orig_to_tok_index': batch[10],
+                      't_attention_mask': batch[1],
+                      'a_attention_mask': batch[7],
+                      'labels': batch[12],
+                      't_input_lens': batch[3],
+                      'a_input_lens':batch[9],
+                      't_word_lens': batch[5],
+                      'a_word_lens':batch[11]}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 inputs["t_token_type_ids"] = (batch[2] if args.model_type in ["bert", "xlnet"] else None)
-                inputs["a_token_type_ids"] = (batch[6] if args.model_type in ["bert", "xlnet"] else None)
+                inputs["a_token_type_ids"] = (batch[8] if args.model_type in ["bert", "xlnet"] else None)
             outputs = model(**inputs)
+            '''
+            print("t_input", tokenizer.decode(inputs['t_input_ids'][0].detach().cpu().numpy()))
+            print("a_input", tokenizer.decode(inputs['a_input_ids'][0].detach().cpu().numpy()))
+            print("t_orig_to_tok_index", inputs['t_orig_to_tok_index'][0])
+            print("a_orig_to_tok_index", inputs['a_orig_to_tok_index'][0])
+            print("t_attention_mask", inputs['t_attention_mask'][0])
+            print("a_attention_mask", inputs['a_attention_mask'][0])
+            print("labels", inputs['labels'][0])
+            print("t_input_lens", inputs['t_input_lens'][0])
+            print("a_input_lens", inputs['a_input_lens'][0])
+            print("t_word_lens", inputs['t_word_lens'][0])
+            print("a_word_lens", inputs['a_word_lens'][0])
+            '''
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -153,13 +172,14 @@ def train(args, train_dataset, model, tokenizer):
                 loss.backward()
             pbar(step, {'loss': loss.item()})
             tr_loss += loss.item()
+            #input()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                scheduler.step()  # Update learning rate schedule
                 optimizer.step()
+                scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
@@ -210,20 +230,26 @@ def evaluate(args, model, tokenizer, prefix=""):
     for step, batch in enumerate(eval_dataloader):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
+        # t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens, t_all_orig_to_tok_index, t_all_word_lens a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens, a_all_orig_to_tok_index, a_all_word_lens, all_label_ids
         with torch.no_grad():
-            inputs = {"t_input_ids": batch[0],
-                      'a_input_ids': batch[4],
-                      "t_attention_mask": batch[1],
-                      'a_attention_mask': batch[5],
-                      "labels": batch[8],
-                      'input_lens':batch[3]}
+            inputs = {'t_input_ids': batch[0],
+                      'a_input_ids': batch[6],
+                      't_orig_to_tok_index': batch[4],
+                      'a_orig_to_tok_index': batch[10],
+                      't_attention_mask': batch[1],
+                      'a_attention_mask': batch[7],
+                      'labels': batch[12],
+                      't_input_lens': batch[3],
+                      'a_input_lens':batch[9],
+                      't_word_lens': batch[5],
+                      'a_word_lens':batch[11]}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 inputs["t_token_type_ids"] = (batch[2] if args.model_type in ["bert", "xlnet"] else None)
-                inputs["a_token_type_ids"] = (batch[6] if args.model_type in ["bert", "xlnet"] else None)
+                inputs["a_token_type_ids"] = (batch[8] if args.model_type in ["bert", "xlnet"] else None)
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
-            tags,_ = model.crf._obtain_labels(logits, args.id2label, inputs['input_lens'])
+            tags,_ = model.crf._obtain_labels(logits, args.id2label, inputs['t_word_lens'])
             if args.n_gpu > 1:
                 tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
             eval_loss += tmp_eval_loss.item()
@@ -273,20 +299,26 @@ def Testevaluate(args, model, tokenizer, prefix=""):
     for step, batch in enumerate(eval_dataloader):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
+        # t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens, t_all_orig_to_tok_index, t_all_word_lens a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens, a_all_orig_to_tok_index, a_all_word_lens, all_label_ids
         with torch.no_grad():
-            inputs = {"t_input_ids": batch[0],
-                      'a_input_ids': batch[4],
-                      "t_attention_mask": batch[1],
-                      'a_attention_mask': batch[5],
-                      "labels": batch[8],
-                      'input_lens':batch[3]}
+            inputs = {'t_input_ids': batch[0],
+                      'a_input_ids': batch[6],
+                      't_orig_to_tok_index': batch[4],
+                      'a_orig_to_tok_index': batch[10],
+                      't_attention_mask': batch[1],
+                      'a_attention_mask': batch[7],
+                      'labels': batch[12],
+                      't_input_lens': batch[3],
+                      'a_input_lens':batch[9],
+                      't_word_lens': batch[5],
+                      'a_word_lens':batch[11]}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 inputs["t_token_type_ids"] = (batch[2] if args.model_type in ["bert", "xlnet"] else None)
-                inputs["a_token_type_ids"] = (batch[6] if args.model_type in ["bert", "xlnet"] else None)
+                inputs["a_token_type_ids"] = (batch[8] if args.model_type in ["bert", "xlnet"] else None)
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
-            tags,_ = model.crf._obtain_labels(logits, args.id2label, inputs['input_lens'])
+            tags,_ = model.crf._obtain_labels(logits, args.id2label, inputs['t_word_lens'])
             if args.n_gpu > 1:
                 tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
             eval_loss += tmp_eval_loss.item()
@@ -333,20 +365,26 @@ def predict(args, model, tokenizer, prefix=""):
     for step, batch in enumerate(test_dataloader):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
+        # t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens, t_all_orig_to_tok_index, t_all_word_lens a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens, a_all_orig_to_tok_index, a_all_word_lens, all_label_ids
         with torch.no_grad():
-            inputs = {"t_input_ids": batch[0],
-                      'a_input_ids': batch[4],
-                      "t_attention_mask": batch[1],
-                      'a_attention_mask': batch[5],
-                      "labels": None,
-                      'input_lens':batch[3]}
+            inputs = {'t_input_ids': batch[0],
+                      'a_input_ids': batch[6],
+                      't_orig_to_tok_index': batch[4],
+                      'a_orig_to_tok_index': batch[10],
+                      't_attention_mask': batch[1],
+                      'a_attention_mask': batch[7],
+                      'labels': None,
+                      't_input_lens': batch[3],
+                      'a_input_lens':batch[9],
+                      't_word_lens': batch[5],
+                      'a_word_lens':batch[11]}
             if args.model_type != "distilbert":
                 # XLM and RoBERTa don"t use segment_ids
                 inputs["t_token_type_ids"] = (batch[2] if args.model_type in ["bert", "xlnet"] else None)
-                inputs["a_token_type_ids"] = (batch[6] if args.model_type in ["bert", "xlnet"] else None)
+                inputs["a_token_type_ids"] = (batch[8] if args.model_type in ["bert", "xlnet"] else None)
             outputs = model(**inputs)
             logits = outputs[0]
-            preds, _ = model.crf._obtain_labels(logits, args.id2label, inputs['input_lens'])
+            preds, _ = model.crf._obtain_labels(logits, args.id2label, inputs['t_word_lens'])
         preds = preds[0][1:-1] # [CLS]XXXX[SEP]
         label_entities = get_entities(preds, args.id2label, args.markup)
         json_d = {}
@@ -403,28 +441,22 @@ def load_and_cache_examples(args, task, tokenizer, data_type='train'):
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
     else:
-        logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = processor.get_labels()
         if data_type == 'train':
-            examples = processor.get_train_examples(args.data_dir)
+            logger.info("Creating features from dataset file at %s", args.train_data_path)
+            examples = processor.get_train_examples(args.train_data_path)
         elif data_type == 'dev':
-            examples = processor.get_dev_examples(args.data_dir)
+            logger.info("Creating features from dataset file at %s", args.dev_data_path)
+            examples = processor.get_dev_examples(args.dev_data_path)
         else:
-            examples = processor.get_test_examples(args.data_dir)
+            logger.info("Creating features from dataset file at %s", args.test_data_path)
+            examples = processor.get_test_examples(args.test_data_path)
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
                                                 label_list=label_list,
-                                                max_attr_length = args.max_attr_length,
                                                 max_seq_length=args.train_max_seq_length if data_type=='train' \
                                                                else args.eval_max_seq_length,
-                                                cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                                                pad_on_left=bool(args.model_type in ['xlnet']),
-                                                cls_token = tokenizer.cls_token,
-                                                cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                                                sep_token=tokenizer.sep_token,
-                                                # pad on the left for xlnet
-                                                pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                                                pad_token_segment_id=4 if args.model_type in ['xlnet'] else 0,
+                                                max_attr_length = args.max_attr_length
                                                 )
         if args.local_rank in [-1, 0]:
             logger.info("Saving features into cached file %s", cached_features_file)
@@ -435,17 +467,22 @@ def load_and_cache_examples(args, task, tokenizer, data_type='train'):
     t_all_input_ids = torch.tensor([f.t_input_ids for f in features], dtype=torch.long)
     t_all_input_mask = torch.tensor([f.t_input_mask for f in features], dtype=torch.long)
     t_all_segment_ids = torch.tensor([f.t_segment_ids for f in features], dtype=torch.long)
-
     t_all_lens = torch.tensor([f.t_input_len for f in features], dtype=torch.long)
+    t_all_orig_to_tok_index = torch.tensor([f.t_orig_to_tok_index for f in features], dtype=torch.long)
+
+    t_all_word_lens = torch.tensor([f.t_word_len for f in features], dtype=torch.long)
 
     a_all_input_ids = torch.tensor([f.a_input_ids for f in features], dtype=torch.long)
     a_all_input_mask = torch.tensor([f.a_input_mask for f in features], dtype=torch.long)
     a_all_segment_ids = torch.tensor([f.a_segment_ids for f in features], dtype=torch.long)
     a_all_lens = torch.tensor([f.a_input_len for f in features], dtype=torch.long)
+    a_all_orig_to_tok_index = torch.tensor([f.a_orig_to_tok_index for f in features], dtype=torch.long)
+    a_all_word_lens = torch.tensor([f.a_word_len for f in features], dtype=torch.long)
 
     all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-    dataset = TensorDataset(t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens,
-                            a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens,all_label_ids)
+    dataset = TensorDataset(t_all_input_ids, t_all_input_mask, t_all_segment_ids, t_all_lens, t_all_orig_to_tok_index, t_all_word_lens,
+                            a_all_input_ids, a_all_input_mask, a_all_segment_ids, a_all_lens, a_all_orig_to_tok_index, a_all_word_lens,
+                            all_label_ids)
     return dataset
 
 def main():
@@ -456,6 +493,12 @@ def main():
                         help="The name of the task to train selected in the list: " + ", ".join(processors.keys()))
     parser.add_argument("--data_dir",default=None,type=str,required=True,
                         help="The input data dir. Should contain the training files for the CoNLL-2003 NER task.",)
+    parser.add_argument("--train_data_path",default=None,type=str,required=True,
+                        help="The input train data.",)
+    parser.add_argument("--dev_data_path",default=None,type=str,required=True,
+                        help="The input dev data.",)
+    parser.add_argument("--test_data_path",default=None,type=str,required=True,
+                        help="The input test data.",)
     parser.add_argument("--model_type",default=None,type=str,required=True,
                         help="Model type selected in the list: " + ", ".join(MODEL_CLASSES.keys()),)
     parser.add_argument("--model_name_or_path",default=None,type=str,required=True,
@@ -650,3 +693,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

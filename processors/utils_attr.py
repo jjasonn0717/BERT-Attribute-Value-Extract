@@ -1,11 +1,14 @@
 import csv
 import json
+import spacy
 import torch
 from models.transformers import BertTokenizer
 
+WORD_TOKENIZER = spacy.load("en_core_web_lg", exclude=["tok2vec", "parser", "ner"])
+
 class CNerTokenizer(BertTokenizer):
-    def __init__(self, vocab_file, do_lower_case=False):
-        super().__init__(vocab_file=str(vocab_file), do_lower_case=do_lower_case)
+    def __init__(self, vocab_file, do_lower_case=False, **kwargs):
+        super().__init__(vocab_file=str(vocab_file), do_lower_case=do_lower_case, **kwargs)
         self.vocab_file = str(vocab_file)
         self.do_lower_case = do_lower_case
 
@@ -23,11 +26,11 @@ class CNerTokenizer(BertTokenizer):
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
 
-    def get_train_examples(self, data_dir):
+    def get_train_examples(self, data_path):
         """Gets a collection of `InputExample`s for the train set."""
         raise NotImplementedError()
 
-    def get_dev_examples(self, data_dir):
+    def get_dev_examples(self, data_path):
         """Gets a collection of `InputExample`s for the dev set."""
         raise NotImplementedError()
 
@@ -37,27 +40,25 @@ class DataProcessor(object):
     @classmethod
     def _read_json(self,input_file):
         lines = []
-        with open(input_file,'r') as f:
+        with open(input_file, 'r') as f:
             for line in f:
                 line = json.loads(line.strip())
-                title = line['title']
-                attr = line['attribute']
-                if attr not in  ['适用性别','风格']:
-                    continue
-                value = line['value']
-                title_words = list(title)
-                attr_words  =  list(attr)
-                labels = ['O'] * len(title_words)
-                if value !='':
-                    assert value in title
-                    s = title.find(value)
-                    if len(value) == 1:
-                        labels[s] = 'S-a'
+                title_tokens = line['tokens']
+                for ann in line['annotation']:
+                    attr = " ".join(ann['label'][0].split('_'))
+                    if attr == 'ignore':
+                        continue
+                    value_tokens = title_tokens[ann['points'][0]['tok_start']:ann['points'][0]['tok_end']+1]
+                    attr_tokens = [tok.text for tok in WORD_TOKENIZER(attr)]
+                    labels = ['O'] * len(title_tokens)
+                    if len(value_tokens) == 1:
+                        labels[ann['points'][0]['tok_start']] = 'S-a'
                     else:
-                        labels[s] = 'B-a'
-                        labels[s+1:s+len(value)] = ['I-a']*(len(value)-1)
-                assert len(labels) == len(title_words)
-                lines.append({"title": title_words, "labels": labels,'attr':attr_words})
+                        labels[ann['points'][0]['tok_start']] = 'B-a'
+                        labels[ann['points'][0]['tok_start']+1:ann['points'][0]['tok_end']+1] = ['I-a']*(len(value_tokens)-1)
+                    assert len(labels) == len(title_tokens)
+                    lines.append({"title": title_tokens, "labels": labels, 'attr': attr_tokens})
+                    #print(json.dumps({"title": title_tokens, "labels": labels, 'attr': attr_tokens}, indent=2))
         return lines
 
 def get_entity_bios(seq,id2label):
@@ -169,3 +170,4 @@ def bert_extract_item(start_logits, end_logits):
                 S.append((s_l, i, i + j))
                 break
     return S
+
